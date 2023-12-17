@@ -36,13 +36,19 @@ func DurationInterceptor(ctx context.Context, method string, req, reply any,
 		}
 	} else {
 		elapsed := timex.Since(start)
+		logger := logx.WithContext(ctx).WithDuration(elapsed)
+		_, ok := notLoggingContentMethods.Load(method)
 		if elapsed > slowThreshold.Load() {
-			logger := logx.WithContext(ctx).WithDuration(elapsed)
-			_, ok := notLoggingContentMethods.Load(method)
 			if ok {
 				logger.Slowf("[RPC] ok - slowcall - %s", serverName)
 			} else {
 				logger.Slowf("[RPC] ok - slowcall - %s - %v - %v", serverName, req, reply)
+			}
+		} else {
+			if ok {
+				logger.Slowf("[RPC] ok - %s", serverName)
+			} else {
+				logger.Slowf("[RPC] ok - %s - %v - %v", serverName, req, reply)
 			}
 		}
 	}
