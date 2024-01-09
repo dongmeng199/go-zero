@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	red "github.com/go-redis/redis/v8"
+	red "github.com/redis/go-redis/v9"
 	"github.com/zeromicro/go-zero/core/breaker"
 	"github.com/zeromicro/go-zero/core/errorx"
 	"github.com/zeromicro/go-zero/core/logx"
@@ -33,22 +33,42 @@ type (
 	hook       struct{}
 )
 
-func (h hook) BeforeProcess(ctx context.Context, cmd red.Cmder) (context.Context, error) {
-	return h.startSpan(context.WithValue(ctx, startTimeKey, timex.Now()), cmd), nil
+func (h hook) DialHook(next red.DialHook) red.DialHook {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return next(ctx, network, addr)
+	}
 }
 
-func (h hook) AfterProcess(ctx context.Context, cmd red.Cmder) error {
+func (h hook) ProcessHook(next red.ProcessHook) red.ProcessHook {
+	return func(ctx context.Context, cmd red.Cmder) error {
+		ctx = h.BeforeProcess(context.WithValue(ctx, startTimeKey, timex.Now()), cmd)
+
+		err := next(ctx, cmd)
+		if err != nil {
+			return err
+		}
+
+		h.AfterProcess(ctx, cmd)
+		return nil
+	}
+}
+
+func (h hook) BeforeProcess(ctx context.Context, cmd red.Cmder) context.Context {
+	return h.startSpan(context.WithValue(ctx, startTimeKey, timex.Now()), cmd)
+}
+
+func (h hook) AfterProcess(ctx context.Context, cmd red.Cmder) {
 	err := cmd.Err()
 	h.endSpan(ctx, err)
 
 	val := ctx.Value(startTimeKey)
 	if val == nil {
-		return nil
+		return
 	}
 
 	start, ok := val.(time.Duration)
 	if !ok {
-		return nil
+		return
 	}
 
 	duration := timex.Since(start)
@@ -61,21 +81,33 @@ func (h hook) AfterProcess(ctx context.Context, cmd red.Cmder) error {
 	if msg := formatError(err); len(msg) > 0 {
 		metricReqErr.Inc(cmd.Name(), msg)
 	}
-
-	return nil
 }
 
-func (h hook) BeforeProcessPipeline(ctx context.Context, cmds []red.Cmder) (context.Context, error) {
+func (h hook) ProcessPipelineHook(next red.ProcessPipelineHook) red.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []red.Cmder) error {
+		ctx = h.BeforeProcessPipeline(ctx, cmds)
+
+		err := next(ctx, cmds)
+		if err != nil {
+			return err
+		}
+
+		h.AfterProcessPipeline(ctx, cmds)
+		return nil
+	}
+}
+
+func (h hook) BeforeProcessPipeline(ctx context.Context, cmds []red.Cmder) context.Context {
 	if len(cmds) == 0 {
-		return ctx, nil
+		return ctx
 	}
 
-	return h.startSpan(context.WithValue(ctx, startTimeKey, timex.Now()), cmds...), nil
+	return h.startSpan(context.WithValue(ctx, startTimeKey, timex.Now()), cmds...)
 }
 
-func (h hook) AfterProcessPipeline(ctx context.Context, cmds []red.Cmder) error {
+func (h hook) AfterProcessPipeline(ctx context.Context, cmds []red.Cmder) {
 	if len(cmds) == 0 {
-		return nil
+		return
 	}
 
 	batchError := errorx.BatchError{}
@@ -91,12 +123,12 @@ func (h hook) AfterProcessPipeline(ctx context.Context, cmds []red.Cmder) error 
 
 	val := ctx.Value(startTimeKey)
 	if val == nil {
-		return nil
+		return
 	}
 
 	start, ok := val.(time.Duration)
 	if !ok {
-		return nil
+		return
 	}
 
 	duration := timex.Since(start)
@@ -108,8 +140,6 @@ func (h hook) AfterProcessPipeline(ctx context.Context, cmds []red.Cmder) error 
 	if msg := formatError(batchError.Err()); len(msg) > 0 {
 		metricReqErr.Inc("Pipeline", msg)
 	}
-
-	return nil
 }
 
 func formatError(err error) string {
